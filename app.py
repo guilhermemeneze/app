@@ -37,7 +37,7 @@ blur_ksize  = st.sidebar.selectbox("Mask blur kernel (odd)", [0, 3, 5, 7], index
 save_png    = st.sidebar.checkbox("Also save transparent PNG", True)
 save_plot   = st.sidebar.checkbox("Save plot with counting", True)
 
-st.caption("Align your plate in the **Inline Preview** first, then switch to **Capture & Save** to store and count.")
+st.caption("Align in **Inline Preview**, then switch to **Capture & Save** to store and count.")
 
 DOWNLOADS = os.path.join(os.path.expanduser("~"), "Downloads")
 
@@ -54,7 +54,7 @@ def build_rtc_config():
 
 rtc_config = build_rtc_config()
 
-# ---------- helpers ----------
+# ---------- Helpers ----------
 def unique_path(path: str) -> str:
     if not os.path.exists(path): return path
     root, ext = os.path.splitext(path); i = 1
@@ -73,7 +73,8 @@ def apply_circle_mask_and_crop(rgb: np.ndarray, cx: int, cy: int, r: int,
         mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel, iterations=int(open_iters))
     mask_blur = cv2.GaussianBlur(mask, (blur_ksize, blur_ksize), 0) if (blur_ksize and blur_ksize % 2 == 1 and blur_ksize >= 3) else mask
     coords = cv2.findNonZero(mask_blur)
-    if coords is None: return None, None, None
+    if coords is None:
+        return None, None, None
     x, y, w_box, h_box = cv2.boundingRect(coords)
     x = max(x - margin, 0); y = max(y - margin, 0)
     x2 = min(x + w_box + 2 * margin, w); y2 = min(y + h_box + 2 * margin, h)
@@ -97,7 +98,9 @@ def count_colonies(image_bgr):
         area = cv2.contourArea(cnt); per = cv2.arcLength(cnt, True)
         if area > 0.1 and per > 0:
             circ = 4 * np.pi * area / (per ** 2)
-            if circ > 0.10: count += 1; cv2.drawContours(vis_rgb, [cnt], -1, (255, 0, 0), 1)
+            if circ > 0.10:
+                count += 1
+                cv2.drawContours(vis_rgb, [cnt], -1, (255, 0, 0), 1)
     cv2.circle(vis_rgb, (cx, cy), radius_local, (200, 200, 200), 2)
     return count, vis_rgb
 
@@ -149,8 +152,11 @@ mode = st.radio("Mode", ["Inline Preview (no capture)", "Capture & Save"], horiz
 if mode == "Inline Preview (no capture)":
     st.write("Rear camera inline preview (no full-screen). Align the plate to the red circle here.")
 
+    # Make sure height is a plain Python int (fixes your error)
+    height_px = int(preview_h) + 8
+
     html = f"""
-    <div style="position:relative;width:100%;max-width:100%;height:{preview_h}px;overflow:hidden;border-radius:12px;background:#000">
+    <div style="position:relative;width:100%;max-width:100%;height:{int(preview_h)}px;overflow:hidden;border-radius:12px;background:#000">
       <video id="pv" autoplay playsinline muted
              style="position:absolute;inset:0;width:100%;height:100%;object-fit:contain;border-radius:12px;background:#000"></video>
       <canvas id="ov" width="0" height="0"
@@ -167,13 +173,12 @@ if mode == "Inline Preview (no capture)":
       const thick = {int(thickness)};
 
       function resizeCanvas() {{
-        // keep canvas pixel size in sync with video actual pixels
         const bw = v.videoWidth || 1280, bh = v.videoHeight || 720;
         c.width = bw; c.height = bh;
       }}
 
       function draw() {{
-        if (c.width === 0 || c.height === 0) {{ requestAnimationFrame(draw); return; }}
+        if (!c.width || !c.height) {{ requestAnimationFrame(draw); return; }}
         ctx.clearRect(0,0,c.width,c.height);
         const cx = Math.round(Xf * c.width);
         const cy = Math.round(Yf * c.height);
@@ -185,31 +190,39 @@ if mode == "Inline Preview (no capture)":
         requestAnimationFrame(draw);
       }}
 
-      try {{
-        const stream = await navigator.mediaDevices.getUserMedia({{video: {{
-          facingMode: {{ exact: "environment" }},
+      async function start(envMode) {{
+        return await navigator.mediaDevices.getUserMedia({{video: {{
+          facingMode: envMode,
           width: {{ ideal: 1280 }},
           height: {{ ideal: 720 }},
           frameRate: {{ ideal: 30 }}
         }}, audio: false}});
+      }}
+
+      try {{
+        let stream;
+        try {{
+          // Prefer exact rear camera
+          stream = await start({{ exact: "environment" }});
+        }} catch(e) {{
+          // Fallback: ideal
+          stream = await start({{ ideal: "environment" }});
+        }}
         v.srcObject = stream;
         v.onloadedmetadata = () => {{ v.play(); resizeCanvas(); }};
         v.onresize = resizeCanvas;
         draw();
-        // stop tracks when iframe unmounts
         window.addEventListener('beforeunload', () => stream.getTracks().forEach(t => t.stop()));
-        document.addEventListener('visibilitychange', () => {{
-          if (document.hidden) stream.getVideoTracks().forEach(t => t.stop());
-        }});
       }} catch(e) {{
         console.error(e);
       }}
     }})();
     </script>
     """
-    components.html(html, height=preview_h+8, scrolling=False, key=f"inline_{radius}_{thickness}_{x_frac}_{y_frac}_{preview_h}")
+    components.html(html, height=height_px, scrolling=False,
+                    key=f"inline_{int(radius)}_{int(thickness)}_{round(float(x_frac),3)}_{round(float(y_frac),3)}_{int(preview_h)}")
 
-    st.info("When the plate fits the circle, switch to **Capture & Save** (below) to store the image and count colonies.")
+    st.info("When the plate fits the circle, switch to **Capture & Save** to store the image and count colonies.")
 
 # ---------- CAPTURE MODE (WebRTC) ----------
 else:
@@ -299,5 +312,6 @@ else:
             else:
                 count, vis_rgb = count_colonies(cv2.cvtColor(cropped_rgb, cv2.COLOR_RGB2BGR))
                 save_and_offer_downloads(base, cropped_rgb, cropped_mask, vis_rgb, count, save_png, save_plot)
+
 
 
