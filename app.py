@@ -17,16 +17,14 @@ import numpy as np
 from PIL import Image
 import matplotlib.pyplot as plt
 import streamlit as st
-from streamlit_webrtc import (
-    webrtc_streamer, WebRtcMode, RTCConfiguration, VideoHTMLAttributes
-)
+from streamlit_webrtc import webrtc_streamer, WebRtcMode, RTCConfiguration, VideoHTMLAttributes
+import streamlit.components.v1 as components
 
 st.set_page_config(page_title="Crop + Save + Count", layout="centered")
 st.title("Crop + Save + Count")
 
-# ---------- Sidebar ----------
+# ---------- Sidebar (circle + processing) ----------
 st.sidebar.header("Circle & Save Settings")
-filename_in = st.sidebar.text_input("Filename (without extension)", value="")
 radius      = st.sidebar.slider("Circle radius (px)", 50, 2000, 400, step=5)
 thickness   = st.sidebar.slider("Circle thickness", 1, 30, 6)
 x_frac      = st.sidebar.slider("Center X (0–1)", 0.0, 1.0, 0.5, step=0.005)
@@ -39,35 +37,30 @@ blur_ksize  = st.sidebar.selectbox("Mask blur kernel (odd)", [0, 3, 5, 7], index
 save_png    = st.sidebar.checkbox("Also save transparent PNG", True)
 save_plot   = st.sidebar.checkbox("Save plot with counting", True)
 
-st.caption("Use the live rear camera. We crop to the red circle and then count colonies.")
+st.caption("Align your plate in the **Inline Preview** first, then switch to **Capture & Save** to store and count.")
 
 DOWNLOADS = os.path.join(os.path.expanduser("~"), "Downloads")
 
-# ---------- STUN + optional TURN (for strict networks) ----------
+# ---------- TURN/STUN (optional) ----------
 def build_rtc_config():
-    ice_servers = [
-        {"urls": ["stun:stun.l.google.com:19302", "stun:stun1.l.google.com:19302"]},
-    ]
+    ice_servers = [{"urls": ["stun:stun.l.google.com:19302", "stun:stun1.l.google.com:19302"]}]
     turn = st.secrets.get("turn") if hasattr(st, "secrets") else None
     if isinstance(turn, dict):
         urls = turn.get("urls"); user = turn.get("username"); cred = turn.get("credential")
         if urls and user and cred:
-            if isinstance(urls, str):
-                urls = [urls]
+            if isinstance(urls, str): urls = [urls]
             ice_servers.append({"urls": urls, "username": user, "credential": cred})
     return RTCConfiguration({"iceServers": ice_servers})
 
 rtc_config = build_rtc_config()
 
-# ---------- Helpers ----------
+# ---------- helpers ----------
 def unique_path(path: str) -> str:
-    if not os.path.exists(path):
-        return path
+    if not os.path.exists(path): return path
     root, ext = os.path.splitext(path); i = 1
     while True:
         cand = f"{root}_{i}{ext}"
-        if not os.path.exists(cand):
-            return cand
+        if not os.path.exists(cand): return cand
         i += 1
 
 def apply_circle_mask_and_crop(rgb: np.ndarray, cx: int, cy: int, r: int,
@@ -80,8 +73,7 @@ def apply_circle_mask_and_crop(rgb: np.ndarray, cx: int, cy: int, r: int,
         mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel, iterations=int(open_iters))
     mask_blur = cv2.GaussianBlur(mask, (blur_ksize, blur_ksize), 0) if (blur_ksize and blur_ksize % 2 == 1 and blur_ksize >= 3) else mask
     coords = cv2.findNonZero(mask_blur)
-    if coords is None:
-        return None, None, None
+    if coords is None: return None, None, None
     x, y, w_box, h_box = cv2.boundingRect(coords)
     x = max(x - margin, 0); y = max(y - margin, 0)
     x2 = min(x + w_box + 2 * margin, w); y2 = min(y + h_box + 2 * margin, h)
@@ -105,15 +97,13 @@ def count_colonies(image_bgr):
         area = cv2.contourArea(cnt); per = cv2.arcLength(cnt, True)
         if area > 0.1 and per > 0:
             circ = 4 * np.pi * area / (per ** 2)
-            if circ > 0.10:
-                count += 1
-                cv2.drawContours(vis_rgb, [cnt], -1, (255, 0, 0), 1)
+            if circ > 0.10: count += 1; cv2.drawContours(vis_rgb, [cnt], -1, (255, 0, 0), 1)
     cv2.circle(vis_rgb, (cx, cy), radius_local, (200, 200, 200), 2)
     return count, vis_rgb
 
-def save_bytes_and_buttons(base: str, cropped_rgb: np.ndarray, cropped_mask: np.ndarray,
-                           vis_rgb: np.ndarray, count: int):
-    # best-effort server save
+def save_and_offer_downloads(base: str, cropped_rgb: np.ndarray, cropped_mask: np.ndarray,
+                             vis_rgb: np.ndarray, count: int, save_png: bool, save_plot: bool):
+    # server save (best effort)
     try:
         Image.fromarray(cropped_rgb).save(unique_path(os.path.join(DOWNLOADS, f"{base}.jpg")), quality=95)
         if save_png:
@@ -123,17 +113,14 @@ def save_bytes_and_buttons(base: str, cropped_rgb: np.ndarray, cropped_mask: np.
                     cv2.cvtColor(vis_rgb, cv2.COLOR_RGB2BGR))
     except Exception:
         pass
-
-    # plot + download buttons
+    # plot + buttons
     fig = plt.figure(figsize=(6, 6))
     plt.imshow(vis_rgb); plt.axis('off'); plt.title(f"Detected Colonies: {count}"); plt.tight_layout()
     try:
         if save_plot:
-            fig.savefig(unique_path(os.path.join(DOWNLOADS, f"{base}_colonies.png")),
-                        dpi=200, bbox_inches="tight")
+            fig.savefig(unique_path(os.path.join(DOWNLOADS, f"{base}_colonies.png")), dpi=200, bbox_inches="tight")
     except Exception:
         pass
-
     jpg_buf = BytesIO(); Image.fromarray(cropped_rgb).save(jpg_buf, format="JPEG", quality=95)
     st.download_button("⬇️ Download cropped JPG", jpg_buf.getvalue(), file_name=f"{base}.jpg", mime="image/jpeg")
     if save_png:
@@ -142,7 +129,6 @@ def save_bytes_and_buttons(base: str, cropped_rgb: np.ndarray, cropped_mask: np.
     if save_plot:
         plot_buf = BytesIO(); fig.savefig(plot_buf, format="PNG", dpi=200, bbox_inches="tight")
         st.download_button("⬇️ Download plot (PNG)", plot_buf.getvalue(), file_name=f"{base}_colonies.png", mime="image/png")
-
     st.image(cropped_rgb, caption="Cropped JPG (black outside circle)", use_column_width=True)
     st.pyplot(fig, use_container_width=True)
     st.metric("Total colonies detected", int(count))
@@ -156,133 +142,162 @@ with col_h:
 with col_lr:
     low_res = st.checkbox("Low-res mode", value=False, help="Use 640×480 @ 15 fps (more stable)")
 
-# CSS: size the video & keep it inline (prevents iOS full-screen)
-st.markdown(f"""
-<style>
-video[playsinline] {{
-  height: {preview_h}px !important;
-  width: 100% !important;
-  object-fit: contain !important;
-  background: #000 !important;
-  border-radius: 12px !important;
-}}
-/* Hide native full-screen button & prevent taps from forcing full-screen on iOS */
-video[playsinline]::-webkit-media-controls-fullscreen-button {{ display: none !important; }}
-video[playsinline] {{ pointer-events: none !important; }}
-</style>
-""", unsafe_allow_html=True)
+# ---------- Mode switch ----------
+mode = st.radio("Mode", ["Inline Preview (no capture)", "Capture & Save"], horizontal=True)
 
-# JS: enforce inline attributes on the <video> (Safari)
-st.markdown("""
-<script>
-(function enforceInline(){
-  function setInline(el){
-    try{
-      el.setAttribute('playsinline','');
-      el.setAttribute('webkit-playsinline','');
-      el.setAttribute('muted','');
-      el.removeAttribute('controls');
-    } catch(e){}
-  }
-  const apply = () => document.querySelectorAll('video').forEach(setInline);
-  const obs = new MutationObserver(apply);
-  obs.observe(document.body, {childList:true, subtree:true});
-  apply();
-})();
-</script>
-""", unsafe_allow_html=True)
+# ---------- INLINE PREVIEW MODE (HTML5 getUserMedia) ----------
+if mode == "Inline Preview (no capture)":
+    st.write("Rear camera inline preview (no full-screen). Align the plate to the red circle here.")
 
-# ---------- Live rear camera ----------
-st.write("Rear camera. Tap START and allow camera access.")
+    html = f"""
+    <div style="position:relative;width:100%;max-width:100%;height:{preview_h}px;overflow:hidden;border-radius:12px;background:#000">
+      <video id="pv" autoplay playsinline muted
+             style="position:absolute;inset:0;width:100%;height:100%;object-fit:contain;border-radius:12px;background:#000"></video>
+      <canvas id="ov" width="0" height="0"
+              style="position:absolute;inset:0;width:100%;height:100%;pointer-events:none;"></canvas>
+    </div>
+    <script>
+    (async () => {{
+      const v = document.getElementById('pv');
+      const c = document.getElementById('ov');
+      const ctx = c.getContext('2d');
+      const R = {int(radius)};
+      const Xf = {float(x_frac)};
+      const Yf = {float(y_frac)};
+      const thick = {int(thickness)};
 
-class CircleOverlay:
-    def __init__(self):
-        self.radius = 400; self.thickness = 6
-        self.x_frac = 0.5; self.y_frac = 0.5
-        self.last_frame_rgb = None
-        self.frame_lock = threading.Lock()
+      function resizeCanvas() {{
+        // keep canvas pixel size in sync with video actual pixels
+        const bw = v.videoWidth || 1280, bh = v.videoHeight || 720;
+        c.width = bw; c.height = bh;
+      }}
 
-    def recv(self, frame: av.VideoFrame) -> av.VideoFrame:
-        img_bgr = frame.to_ndarray(format="bgr24")
-        h, w = img_bgr.shape[:2]
-        cx = int(self.x_frac * w); cy = int(self.y_frac * h)
-        cv2.circle(img_bgr, (cx, cy), int(self.radius), (0, 0, 255), int(self.thickness), cv2.LINE_AA)
-        rgb = frame.to_ndarray(format="rgb24")
-        with self.frame_lock:
-            self.last_frame_rgb = rgb
-        return av.VideoFrame.from_ndarray(img_bgr, format="bgr24")
+      function draw() {{
+        if (c.width === 0 || c.height === 0) {{ requestAnimationFrame(draw); return; }}
+        ctx.clearRect(0,0,c.width,c.height);
+        const cx = Math.round(Xf * c.width);
+        const cy = Math.round(Yf * c.height);
+        ctx.beginPath();
+        ctx.lineWidth = thick;
+        ctx.strokeStyle = "red";
+        ctx.arc(cx, cy, R, 0, Math.PI*2);
+        ctx.stroke();
+        requestAnimationFrame(draw);
+      }}
 
-# Rear camera + resolution profile
-if low_res:
-    video_constraints = {
-        "facingMode": {"exact": "environment"},
-        "advanced": [{"facingMode": "environment"}],
-        "width": {"ideal": 640, "max": 640},
-        "height": {"ideal": 480, "max": 480},
-        "frameRate": {"ideal": 15, "max": 15},
-    }
+      try {{
+        const stream = await navigator.mediaDevices.getUserMedia({{video: {{
+          facingMode: {{ exact: "environment" }},
+          width: {{ ideal: 1280 }},
+          height: {{ ideal: 720 }},
+          frameRate: {{ ideal: 30 }}
+        }}, audio: false}});
+        v.srcObject = stream;
+        v.onloadedmetadata = () => {{ v.play(); resizeCanvas(); }};
+        v.onresize = resizeCanvas;
+        draw();
+        // stop tracks when iframe unmounts
+        window.addEventListener('beforeunload', () => stream.getTracks().forEach(t => t.stop()));
+        document.addEventListener('visibilitychange', () => {{
+          if (document.hidden) stream.getVideoTracks().forEach(t => t.stop());
+        }});
+      }} catch(e) {{
+        console.error(e);
+      }}
+    }})();
+    </script>
+    """
+    components.html(html, height=preview_h+8, scrolling=False, key=f"inline_{radius}_{thickness}_{x_frac}_{y_frac}_{preview_h}")
+
+    st.info("When the plate fits the circle, switch to **Capture & Save** (below) to store the image and count colonies.")
+
+# ---------- CAPTURE MODE (WebRTC) ----------
 else:
-    video_constraints = {
-        "facingMode": {"exact": "environment"},
-        "advanced": [{"facingMode": "environment"}],
-        "width": {"ideal": 1280},
-        "height": {"ideal": 720},
-        "frameRate": {"ideal": 30, "max": 30},
-    }
+    st.write("Rear camera capture. Tap START (allow camera), then **Capture & Save**.")
 
-ctx = webrtc_streamer(
-    key="camera_live_circle",
-    mode=WebRtcMode.SENDRECV,
-    rtc_configuration=rtc_config,
-    media_stream_constraints={"video": video_constraints, "audio": False},
-    video_html_attrs=VideoHTMLAttributes(
-        autoPlay=True,
-        controls=False,
-        playsinline=True,   # keep inline
-        muted=True,         # required by iOS for inline autoplay
-    ),
-    video_processor_factory=CircleOverlay,
-    async_transform=True,   # smoother, fewer freezes
-)
+    class CircleOverlay:
+        def __init__(self):
+            self.radius = 400; self.thickness = 6
+            self.x_frac = 0.5; self.y_frac = 0.5
+            self.last_frame_rgb = None
+            self.frame_lock = threading.Lock()
+        def recv(self, frame: av.VideoFrame) -> av.VideoFrame:
+            img_bgr = frame.to_ndarray(format="bgr24")
+            h, w = img_bgr.shape[:2]
+            cx = int(self.x_frac * w); cy = int(self.y_frac * h)
+            cv2.circle(img_bgr, (cx, cy), int(self.radius), (0, 0, 255), int(self.thickness), cv2.LINE_AA)
+            rgb = frame.to_ndarray(format="rgb24")
+            with self.frame_lock:
+                self.last_frame_rgb = rgb
+            return av.VideoFrame.from_ndarray(img_bgr, format="bgr24")
 
-# keep overlay in sync with sliders
-if ctx and ctx.video_processor:
-    ctx.video_processor.radius    = radius
-    ctx.video_processor.thickness = thickness
-    ctx.video_processor.x_frac    = x_frac
-    ctx.video_processor.y_frac    = y_frac
-
-def get_current_frame_rgb():
-    try:
-        if ctx and hasattr(ctx, "video_receiver") and ctx.video_receiver:
-            av_frame = ctx.video_receiver.get_frame(timeout=1.0)
-            if av_frame is not None:
-                return av_frame.to_ndarray(format="rgb24")
-    except Exception:
-        pass
-    if ctx and ctx.video_processor:
-        with ctx.video_processor.frame_lock:
-            if ctx.video_processor.last_frame_rgb is not None:
-                return ctx.video_processor.last_frame_rgb.copy()
-    return None
-
-st.divider()
-if st.button("📸 Capture & Save"):
-    rgb = get_current_frame_rgb()
-    if rgb is None:
-        st.info("No camera frames. Make sure you allowed camera access and you are on HTTPS. "
-                "If it still freezes, enable Low-res mode or configure a TURN server.")
+    # constraints (low-res for stability if needed)
+    if low_res:
+        video_constraints = {
+            "facingMode": {"exact": "environment"},
+            "advanced": [{"facingMode": "environment"}],
+            "width": {"ideal": 640, "max": 640},
+            "height": {"ideal": 480, "max": 480},
+            "frameRate": {"ideal": 15, "max": 15},
+        }
     else:
-        base = (name_top or filename_in or f"petri_{datetime.now().strftime('%Y%m%d_%H%M%S')}").strip()
-        H, W = rgb.shape[:2]
-        cx = int(x_frac * W); cy = int(y_frac * H); r = int(radius)
-        cropped_rgb, cropped_mask, _ = apply_circle_mask_and_crop(
-            rgb, cx, cy, r, margin=int(margin), open_iters=int(open_iters), blur_ksize=int(blur_ksize)
-        )
-        if cropped_rgb is None:
-            st.error("Nothing inside the circle. Adjust the circle or re-center.")
-        else:
-            count, vis_rgb = count_colonies(cv2.cvtColor(cropped_rgb, cv2.COLOR_RGB2BGR))
-            save_bytes_and_buttons(base, cropped_rgb, cropped_mask, vis_rgb, count)
+        video_constraints = {
+            "facingMode": {"exact": "environment"},
+            "advanced": [{"facingMode": "environment"}],
+            "width": {"ideal": 1280},
+            "height": {"ideal": 720},
+            "frameRate": {"ideal": 30, "max": 30},
+        }
 
-st.caption("iPhone: use Safari. Inline preview is enforced. For strict networks, add a TURN server in Secrets.")
+    ctx = webrtc_streamer(
+        key="camera_live_circle",
+        mode=WebRtcMode.SENDRECV,
+        rtc_configuration=rtc_config,
+        media_stream_constraints={"video": video_constraints, "audio": False},
+        video_html_attrs=VideoHTMLAttributes(autoPlay=True, controls=False, playsinline=True, muted=True),
+        video_processor_factory=CircleOverlay,
+        async_transform=True,
+    )
+
+    # live-sync overlay with sliders
+    if ctx and ctx.video_processor:
+        ctx.video_processor.radius    = radius
+        ctx.video_processor.thickness = thickness
+        ctx.video_processor.x_frac    = x_frac
+        ctx.video_processor.y_frac    = y_frac
+
+    def get_current_frame_rgb():
+        try:
+            if ctx and hasattr(ctx, "video_receiver") and ctx.video_receiver:
+                av_frame = ctx.video_receiver.get_frame(timeout=1.0)
+                if av_frame is not None:
+                    return av_frame.to_ndarray(format="rgb24")
+        except Exception:
+            pass
+        if ctx and ctx.video_processor:
+            with ctx.video_processor.frame_lock:
+                if ctx.video_processor.last_frame_rgb is not None:
+                    return ctx.video_processor.last_frame_rgb.copy()
+        return None
+
+    st.divider()
+    if st.button("📸 Capture & Save"):
+        rgb = get_current_frame_rgb()
+        if rgb is None:
+            st.info("No camera frames. Make sure you pressed START and allowed access. "
+                    "If it freezes, enable Low-res mode or add a TURN server.")
+        else:
+            base = (name_top or f"petri_{datetime.now().strftime('%Y%m%d_%H%M%S')}").strip()
+            H, W = rgb.shape[:2]
+            cx = int(x_frac * W); cy = int(y_frac * H); r = int(radius)
+
+            cropped_rgb, cropped_mask, _ = apply_circle_mask_and_crop(
+                rgb, cx, cy, r, margin=int(margin), open_iters=int(open_iters), blur_ksize=int(blur_ksize)
+            )
+            if cropped_rgb is None:
+                st.error("Nothing inside the circle. Adjust the circle or re-center.")
+            else:
+                count, vis_rgb = count_colonies(cv2.cvtColor(cropped_rgb, cv2.COLOR_RGB2BGR))
+                save_and_offer_downloads(base, cropped_rgb, cropped_mask, vis_rgb, count, save_png, save_plot)
+
+
