@@ -47,7 +47,28 @@ st.caption(
 )
 
 DOWNLOADS = os.path.join(os.path.expanduser("~"), "Downloads")
-rtc_config = RTCConfiguration({"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]})
+
+# ---------- Build RTC config (STUN + optional TURN from secrets) ----------
+def build_rtc_config():
+    ice_servers = [
+        {"urls": ["stun:stun.l.google.com:19302", "stun:stun1.l.google.com:19302"]},
+    ]
+    turn = st.secrets.get("turn") if hasattr(st, "secrets") else None
+    if isinstance(turn, dict):
+        urls = turn.get("urls")
+        username = turn.get("username")
+        credential = turn.get("credential")
+        if urls and username and credential:
+            if isinstance(urls, str):
+                urls = [urls]
+            ice_servers.append({
+                "urls": urls,
+                "username": username,
+                "credential": credential
+            })
+    return RTCConfiguration({"iceServers": ice_servers})
+
+rtc_config = build_rtc_config()
 
 # ---------- Helpers ----------
 def unique_path(path: str) -> str:
@@ -123,40 +144,40 @@ def count_colonies(image_bgr):
 
 def save_bytes_and_buttons(base: str, cropped_rgb: np.ndarray, cropped_mask: np.ndarray,
                            vis_rgb: np.ndarray, count: int):
-    """Save to server Downloads and also expose mobile-friendly download buttons."""
-    # 1) Filesystem saves (server side)
-    jpg_path = unique_path(os.path.join(DOWNLOADS, f"{base}.jpg"))
-    Image.fromarray(cropped_rgb).save(jpg_path, quality=95)
+    from io import BytesIO
+    # Save on server (optional; mobile users mainly use download buttons)
+    try:
+        jpg_path = unique_path(os.path.join(DOWNLOADS, f"{base}.jpg"))
+        Image.fromarray(cropped_rgb).save(jpg_path, quality=95)
+        if save_png:
+            rgba = np.dstack([cropped_rgb, cropped_mask])
+            png_path = unique_path(os.path.join(DOWNLOADS, f"{base}.png"))
+            Image.fromarray(rgba).save(png_path)
+        processed_path = unique_path(os.path.join(DOWNLOADS, f"{base}_processed.png"))
+        cv2.imwrite(processed_path, cv2.cvtColor(vis_rgb, cv2.COLOR_RGB2BGR))
+    except Exception:
+        pass
 
-    png_path = None
-    if save_png:
-        rgba = np.dstack([cropped_rgb, cropped_mask])
-        png_path = unique_path(os.path.join(DOWNLOADS, f"{base}.png"))
-        Image.fromarray(rgba).save(png_path)
-
-    processed_path = unique_path(os.path.join(DOWNLOADS, f"{base}_processed.png"))
-    cv2.imwrite(processed_path, cv2.cvtColor(vis_rgb, cv2.COLOR_RGB2BGR))
-
-    # Plot
+    # Create plot
     fig = plt.figure(figsize=(6, 6))
     plt.imshow(vis_rgb)
     plt.axis('off')
     plt.title(f"Detected Colonies: {count}")
     plt.tight_layout()
 
-    plot_path = None
     if save_plot:
-        plot_path = unique_path(os.path.join(DOWNLOADS, f"{base}_colonies.png"))
-        fig.savefig(plot_path, dpi=200, bbox_inches="tight")
+        try:
+            plot_path = unique_path(os.path.join(DOWNLOADS, f"{base}_colonies.png"))
+            fig.savefig(plot_path, dpi=200, bbox_inches="tight")
+        except Exception:
+            pass
 
-    # 2) Download buttons (client/mobile friendly)
-    # JPG bytes
+    # Download buttons (work on phones)
     jpg_buf = BytesIO()
     Image.fromarray(cropped_rgb).save(jpg_buf, format="JPEG", quality=95)
     st.download_button("⬇️ Download cropped JPG", jpg_buf.getvalue(),
                        file_name=f"{base}.jpg", mime="image/jpeg")
 
-    # PNG bytes
     if save_png:
         png_buf = BytesIO()
         rgba = np.dstack([cropped_rgb, cropped_mask])
@@ -164,7 +185,6 @@ def save_bytes_and_buttons(base: str, cropped_rgb: np.ndarray, cropped_mask: np.
         st.download_button("⬇️ Download transparent PNG", png_buf.getvalue(),
                            file_name=f"{base}.png", mime="image/png")
 
-    # Plot bytes
     if save_plot:
         plot_buf = BytesIO()
         fig.savefig(plot_buf, format="PNG", dpi=200, bbox_inches="tight")
@@ -181,7 +201,14 @@ tab_cam, tab_gallery = st.tabs(["📷 Live camera", "🖼️ Upload from gallery
 
 # ===== Tab 1: Live camera with overlay =====
 with tab_cam:
-    st.write("Use the live preview with a red circle. Rear camera is requested on phones.")
+    # Mobile compatibility toggles
+    colA, colB = st.columns(2)
+    with colA:
+        use_front = st.checkbox("Use front camera", value=False)
+    with colB:
+        low_res = st.checkbox("Low-res fallback (640×480)", value=False)
+
+    st.write("Tap **START** to allow camera. If it fails, try toggling front camera or low-res, then **STOP** → **START**.")
 
     class CircleOverlay:
         def __init__(self):
@@ -198,37 +225,58 @@ with tab_cam:
             cx = int(self.x_frac * w)
             cy = int(self.y_frac * h)
             cv2.circle(img_bgr, (cx, cy), int(self.radius), (0, 0, 255), int(self.thickness), cv2.LINE_AA)
-
             rgb = frame.to_ndarray(format="rgb24")
             with self.frame_lock:
                 self.last_frame_rgb = rgb
-
             return av.VideoFrame.from_ndarray(img_bgr, format="bgr24")
+
+    # Build media constraints based on toggles
+    facing_mode = "user" if use_front else "environment"
+    if low_res:
+        video_constraints = {
+            "facingMode": {"ideal": facing_mode},
+            "width": {"ideal": 640, "max": 640},
+            "height": {"ideal": 480, "max": 480},
+            "frameRate": {"ideal": 24, "max": 30},
+        }
+    else:
+        video_constraints = {
+            "facingMode": {"ideal": facing_mode},
+            "width": {"ideal": 1280},
+            "height": {"ideal": 720},
+            "frameRate": {"ideal": 30},
+        }
 
     ctx = webrtc_streamer(
         key="camera_live_circle",
         mode=WebRtcMode.SENDRECV,
         rtc_configuration=rtc_config,
-        media_stream_constraints={
-            "video": {
-                "facingMode": {"ideal": "environment"},  # rear camera on phones
-                "width": {"ideal": 1280},
-                "height": {"ideal": 720},
-            },
-            "audio": False,
-        },
+        media_stream_constraints={"video": video_constraints, "audio": False},
         video_html_attrs=VideoHTMLAttributes(autoPlay=True, controls=False),
         video_processor_factory=CircleOverlay,
     )
 
+    # Live updates for the overlay
     if ctx and ctx.video_processor:
         ctx.video_processor.radius    = radius
         ctx.video_processor.thickness = thickness
         ctx.video_processor.x_frac    = x_frac
         ctx.video_processor.y_frac    = y_frac
 
+    # Debug panel to see connection status
+    with st.expander("🔎 Debug connection"):
+        try:
+            st.write("State.playing:", getattr(ctx.state, "playing", None))
+            stats = ctx.get_stats() if ctx else {}
+            # Show a tiny subset to keep it readable
+            if isinstance(stats, dict):
+                for k, v in list(stats.items())[:3]:
+                    st.write(k, list(v.keys())[:3])
+        except Exception as e:
+            st.write("No stats:", e)
+
+    # Grab a current frame safely
     def get_current_frame_rgb():
-        # Try to pull a fresh frame from WebRTC
         try:
             if ctx and hasattr(ctx, "video_receiver") and ctx.video_receiver:
                 av_frame = ctx.video_receiver.get_frame(timeout=1.0)
@@ -236,7 +284,6 @@ with tab_cam:
                     return av_frame.to_ndarray(format="rgb24")
         except Exception:
             pass
-        # Fallback: last stored frame
         if ctx and ctx.video_processor:
             with ctx.video_processor.frame_lock:
                 if ctx.video_processor.last_frame_rgb is not None:
@@ -247,7 +294,8 @@ with tab_cam:
     if st.button("📸 Capture & Save (live camera)"):
         rgb = get_current_frame_rgb()
         if rgb is None:
-            st.info("Waiting for camera. Please allow access and try again.")
+            st.info("Still no camera frames. Try: STOP → toggle front/low-res → START. "
+                    "If your network blocks P2P, add a TURN server in Secrets.")
         else:
             base = (filename_in or "").strip() or f"petri_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
             H, W = rgb.shape[:2]
@@ -261,13 +309,8 @@ with tab_cam:
             if cropped_rgb is None:
                 st.error("Nothing inside the circle. Adjust the circle or recenter.")
             else:
-                # Count + save + show + download buttons
                 count, vis_rgb = count_colonies(cv2.cvtColor(cropped_rgb, cv2.COLOR_RGB2BGR))
-                try:
-                    save_bytes_and_buttons(base, cropped_rgb, cropped_mask, vis_rgb, count)
-                except Exception as e:
-                    st.warning(f"Could not write to {DOWNLOADS} ({e}). Using download buttons only.")
-                    save_bytes_and_buttons(base, cropped_rgb, cropped_mask, vis_rgb, count)
+                save_bytes_and_buttons(base, cropped_rgb, cropped_mask, vis_rgb, count)
 
 # ===== Tab 2: Upload from gallery =====
 with tab_gallery:
@@ -282,7 +325,6 @@ with tab_gallery:
         cy = int(y_frac * H)
         r  = int(radius)
 
-        # Preview with circle on the uploaded image
         preview = rgb.copy()
         cv2.circle(preview, (cx, cy), r, (255, 0, 0), int(thickness), cv2.LINE_AA)
         st.image(preview, caption="Preview with circle (uploaded image)", use_column_width=True)
@@ -296,16 +338,10 @@ with tab_gallery:
             else:
                 base = (filename_in or os.path.splitext(uploaded.name)[0]).strip() or \
                        f"petri_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
-
                 count, vis_rgb = count_colonies(cv2.cvtColor(cropped_rgb, cv2.COLOR_RGB2BGR))
-                try:
-                    save_bytes_and_buttons(base, cropped_rgb, cropped_mask, vis_rgb, count)
-                except Exception as e:
-                    st.warning(f"Could not write to {DOWNLOADS} ({e}). Using download buttons only.")
-                    save_bytes_and_buttons(base, cropped_rgb, cropped_mask, vis_rgb, count)
+                save_bytes_and_buttons(base, cropped_rgb, cropped_mask, vis_rgb, count)
 
 st.caption(
-    "Tip for phones: camera access usually requires **HTTPS**. "
-    "If you’re opening this from another device on your LAN, deploy with HTTPS (e.g., Streamlit Cloud) "
-    "or use the **Upload from gallery** tab which works everywhere."
+    "Mobile tips: use the app over **HTTPS**. If camera still won’t start, try **front camera** or **low-res** "
+    "and press **STOP → START**. In strict networks, configure a **TURN** server in app **Secrets**."
 )
