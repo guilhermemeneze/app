@@ -6,7 +6,6 @@ Created on Wed Aug 20 13:08:19 2025
 """
 
 # app.py
-# app.py
 import os
 import threading
 from datetime import datetime
@@ -67,7 +66,8 @@ def unique_path(path: str) -> str:
     root, ext = os.path.splitext(path); i = 1
     while True:
         cand = f"{root}_{i}{ext}"
-        if not os.path.exists(cand): return cand
+        if not os.path.exists(cand):
+            return cand
         i += 1
 
 def apply_circle_mask_and_crop(rgb: np.ndarray, cx: int, cy: int, r: int,
@@ -80,7 +80,8 @@ def apply_circle_mask_and_crop(rgb: np.ndarray, cx: int, cy: int, r: int,
         mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel, iterations=int(open_iters))
     mask_blur = cv2.GaussianBlur(mask, (blur_ksize, blur_ksize), 0) if (blur_ksize and blur_ksize % 2 == 1 and blur_ksize >= 3) else mask
     coords = cv2.findNonZero(mask_blur)
-    if coords is None: return None, None, None
+    if coords is None:
+        return None, None, None
     x, y, w_box, h_box = cv2.boundingRect(coords)
     x = max(x - margin, 0); y = max(y - margin, 0)
     x2 = min(x + w_box + 2 * margin, w); y2 = min(y + h_box + 2 * margin, h)
@@ -105,7 +106,8 @@ def count_colonies(image_bgr):
         if area > 0.1 and per > 0:
             circ = 4 * np.pi * area / (per ** 2)
             if circ > 0.10:
-                count += 1; cv2.drawContours(vis_rgb, [cnt], -1, (255, 0, 0), 1)
+                count += 1
+                cv2.drawContours(vis_rgb, [cnt], -1, (255, 0, 0), 1)
     cv2.circle(vis_rgb, (cx, cy), radius_local, (200, 200, 200), 2)
     return count, vis_rgb
 
@@ -121,6 +123,7 @@ def save_bytes_and_buttons(base: str, cropped_rgb: np.ndarray, cropped_mask: np.
                     cv2.cvtColor(vis_rgb, cv2.COLOR_RGB2BGR))
     except Exception:
         pass
+
     # plot + download buttons
     fig = plt.figure(figsize=(6, 6))
     plt.imshow(vis_rgb); plt.axis('off'); plt.title(f"Detected Colonies: {count}"); plt.tight_layout()
@@ -130,6 +133,7 @@ def save_bytes_and_buttons(base: str, cropped_rgb: np.ndarray, cropped_mask: np.
                         dpi=200, bbox_inches="tight")
     except Exception:
         pass
+
     jpg_buf = BytesIO(); Image.fromarray(cropped_rgb).save(jpg_buf, format="JPEG", quality=95)
     st.download_button("⬇️ Download cropped JPG", jpg_buf.getvalue(), file_name=f"{base}.jpg", mime="image/jpeg")
     if save_png:
@@ -138,6 +142,7 @@ def save_bytes_and_buttons(base: str, cropped_rgb: np.ndarray, cropped_mask: np.
     if save_plot:
         plot_buf = BytesIO(); fig.savefig(plot_buf, format="PNG", dpi=200, bbox_inches="tight")
         st.download_button("⬇️ Download plot (PNG)", plot_buf.getvalue(), file_name=f"{base}_colonies.png", mime="image/png")
+
     st.image(cropped_rgb, caption="Cropped JPG (black outside circle)", use_column_width=True)
     st.pyplot(fig, use_container_width=True)
     st.metric("Total colonies detected", int(count))
@@ -151,7 +156,7 @@ with col_h:
 with col_lr:
     low_res = st.checkbox("Low-res mode", value=False, help="Use 640×480 @ 15 fps (more stable)")
 
-# CSS to size the <video> element
+# CSS: size the video & keep it inline (prevents iOS full-screen)
 st.markdown(f"""
 <style>
 video[playsinline] {{
@@ -161,10 +166,33 @@ video[playsinline] {{
   background: #000 !important;
   border-radius: 12px !important;
 }}
+/* Hide native full-screen button & prevent taps from forcing full-screen on iOS */
+video[playsinline]::-webkit-media-controls-fullscreen-button {{ display: none !important; }}
+video[playsinline] {{ pointer-events: none !important; }}
 </style>
 """, unsafe_allow_html=True)
 
-# ---------- Live rear camera with circle ----------
+# JS: enforce inline attributes on the <video> (Safari)
+st.markdown("""
+<script>
+(function enforceInline(){
+  function setInline(el){
+    try{
+      el.setAttribute('playsinline','');
+      el.setAttribute('webkit-playsinline','');
+      el.setAttribute('muted','');
+      el.removeAttribute('controls');
+    } catch(e){}
+  }
+  const apply = () => document.querySelectorAll('video').forEach(setInline);
+  const obs = new MutationObserver(apply);
+  obs.observe(document.body, {childList:true, subtree:true});
+  apply();
+})();
+</script>
+""", unsafe_allow_html=True)
+
+# ---------- Live rear camera ----------
 st.write("Rear camera. Tap START and allow camera access.")
 
 class CircleOverlay:
@@ -173,7 +201,7 @@ class CircleOverlay:
         self.x_frac = 0.5; self.y_frac = 0.5
         self.last_frame_rgb = None
         self.frame_lock = threading.Lock()
-    # async transform = smoother pipeline
+
     def recv(self, frame: av.VideoFrame) -> av.VideoFrame:
         img_bgr = frame.to_ndarray(format="bgr24")
         h, w = img_bgr.shape[:2]
@@ -184,7 +212,7 @@ class CircleOverlay:
             self.last_frame_rgb = rgb
         return av.VideoFrame.from_ndarray(img_bgr, format="bgr24")
 
-# Constraints: rear camera + resolution/profile
+# Rear camera + resolution profile
 if low_res:
     video_constraints = {
         "facingMode": {"exact": "environment"},
@@ -207,12 +235,17 @@ ctx = webrtc_streamer(
     mode=WebRtcMode.SENDRECV,
     rtc_configuration=rtc_config,
     media_stream_constraints={"video": video_constraints, "audio": False},
-    video_html_attrs=VideoHTMLAttributes(autoPlay=True, controls=False, playsinline=True),
+    video_html_attrs=VideoHTMLAttributes(
+        autoPlay=True,
+        controls=False,
+        playsinline=True,   # keep inline
+        muted=True,         # required by iOS for inline autoplay
+    ),
     video_processor_factory=CircleOverlay,
-    async_transform=True,   # <— reduces freezes
+    async_transform=True,   # smoother, fewer freezes
 )
 
-# keep overlay synced
+# keep overlay in sync with sliders
 if ctx and ctx.video_processor:
     ctx.video_processor.radius    = radius
     ctx.video_processor.thickness = thickness
@@ -237,7 +270,7 @@ st.divider()
 if st.button("📸 Capture & Save"):
     rgb = get_current_frame_rgb()
     if rgb is None:
-        st.info("No camera frames. Ensure permission is granted and you’re on HTTPS. "
+        st.info("No camera frames. Make sure you allowed camera access and you are on HTTPS. "
                 "If it still freezes, enable Low-res mode or configure a TURN server.")
     else:
         base = (name_top or filename_in or f"petri_{datetime.now().strftime('%Y%m%d_%H%M%S')}").strip()
@@ -252,11 +285,4 @@ if st.button("📸 Capture & Save"):
             count, vis_rgb = count_colonies(cv2.cvtColor(cropped_rgb, cv2.COLOR_RGB2BGR))
             save_bytes_and_buttons(base, cropped_rgb, cropped_mask, vis_rgb, count)
 
-st.caption("Tip: Safari (iOS) works best. If video freezes: turn on **Low-res mode**, disable Low Power Mode, "
-           "keep the app in the foreground, and (for strict networks) add a **TURN** server in Secrets.")
-
-
-
-
-
-
+st.caption("iPhone: use Safari. Inline preview is enforced. For strict networks, add a TURN server in Secrets.")
