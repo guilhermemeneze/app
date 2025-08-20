@@ -26,22 +26,22 @@ st.set_page_config(page_title="Crop + Save + Count", layout="centered")
 st.title("Crop + Save + Count")
 
 # ---------- Sidebar ----------
-st.sidebar.header("Circle & Save Settings")
-# (You can ignore this sidebar filename now; the main-name box below the title will override it)
-filename_in = st.sidebar.text_input("Filename (without extension)", value="")
-radius      = st.sidebar.slider("Circle radius (px)", 50, 2000, 400, step=5)
-thickness   = st.sidebar.slider("Circle thickness", 1, 30, 6)
-x_frac      = st.sidebar.slider("Center X (0–1)", 0.0, 1.0, 0.5, step=0.005)
-y_frac      = st.sidebar.slider("Center Y (0–1)", 0.0, 1.0, 0.5, step=0.005)
+st.sidebar.header("Configurações do círculo e salvamento")
+# (Opcional) Nome no sidebar – o campo acima do vídeo tem prioridade
+filename_in = st.sidebar.text_input("Nome do arquivo (sem extensão)", value="")
+radius      = st.sidebar.slider("Raio do círculo (px)", 50, 2000, 400, step=5)
+thickness   = st.sidebar.slider("Espessura do círculo", 1, 30, 6)
+x_frac      = st.sidebar.slider("Centro X (0–1)", 0.0, 1.0, 0.5, step=0.005)
+y_frac      = st.sidebar.slider("Centro Y (0–1)", 0.0, 1.0, 0.5, step=0.005)
 
-margin      = st.sidebar.number_input("Crop margin (px)", 0, 200, 10)
-open_iters  = st.sidebar.number_input("Mask open iterations", 0, 5, 1)
-blur_ksize  = st.sidebar.selectbox("Blur kernel (odd)", [0, 3, 5, 7], index=2)
+margin      = st.sidebar.number_input("Margem do recorte (px)", 0, 200, 10)
+open_iters  = st.sidebar.number_input("Abertura morfológica (iterações)", 0, 5, 1)
+blur_ksize  = st.sidebar.selectbox("Desfoque da máscara (ímpar)", [0, 3, 5, 7], index=2)
 
-save_png    = st.sidebar.checkbox("Also save transparent PNG", True)
-save_plot   = st.sidebar.checkbox("Save plot with counting", True)
+save_png    = st.sidebar.checkbox("Salvar PNG transparente", True)
+save_plot   = st.sidebar.checkbox("Salvar gráfico com contagem", True)
 
-st.caption("Use the live rear camera. We crop by the red circle and count colonies.")
+st.caption("Use a câmera traseira com o círculo vermelho, capture, recortamos pelo círculo e contamos colônias.")
 
 DOWNLOADS = os.path.join(os.path.expanduser("~"), "Downloads")
 rtc_config = RTCConfiguration({"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]})
@@ -120,7 +120,7 @@ def count_colonies(image_bgr):
 
 def save_bytes_and_buttons(base: str, cropped_rgb: np.ndarray, cropped_mask: np.ndarray,
                            vis_rgb: np.ndarray, count: int):
-    # Save on server (best effort)
+    # Salva no servidor (melhor esforço)
     try:
         Image.fromarray(cropped_rgb).save(unique_path(os.path.join(DOWNLOADS, f"{base}.jpg")), quality=95)
         if save_png:
@@ -131,7 +131,7 @@ def save_bytes_and_buttons(base: str, cropped_rgb: np.ndarray, cropped_mask: np.
     except Exception:
         pass
 
-    # Plot
+    # Gráfico
     fig = plt.figure(figsize=(6, 6))
     plt.imshow(vis_rgb); plt.axis('off'); plt.title(f"Detected Colonies: {count}"); plt.tight_layout()
     try:
@@ -141,26 +141,42 @@ def save_bytes_and_buttons(base: str, cropped_rgb: np.ndarray, cropped_mask: np.
     except Exception:
         pass
 
-    # Mobile-friendly downloads
+    # Downloads (mobile)
     jpg_buf = BytesIO(); Image.fromarray(cropped_rgb).save(jpg_buf, format="JPEG", quality=95)
-    st.download_button("⬇️ Download cropped JPG", jpg_buf.getvalue(), file_name=f"{base}.jpg", mime="image/jpeg")
+    st.download_button("⬇️ Download JPG recortado", jpg_buf.getvalue(), file_name=f"{base}.jpg", mime="image/jpeg")
     if save_png:
         png_buf = BytesIO(); Image.fromarray(np.dstack([cropped_rgb, cropped_mask])).save(png_buf, format="PNG")
-        st.download_button("⬇️ Download transparent PNG", png_buf.getvalue(), file_name=f"{base}.png", mime="image/png")
+        st.download_button("⬇️ Download PNG transparente", png_buf.getvalue(), file_name=f"{base}.png", mime="image/png")
     if save_plot:
         plot_buf = BytesIO(); fig.savefig(plot_buf, format="PNG", dpi=200, bbox_inches="tight")
-        st.download_button("⬇️ Download plot (PNG)", plot_buf.getvalue(), file_name=f"{base}_colonies.png", mime="image/png")
+        st.download_button("⬇️ Download gráfico (PNG)", plot_buf.getvalue(), file_name=f"{base}_colonies.png", mime="image/png")
 
-    # Show
-    st.image(cropped_rgb, caption="Cropped JPG (black outside circle)", use_column_width=True)
+    st.image(cropped_rgb, caption="JPG recortado (preto fora do círculo)", use_column_width=True)
     st.pyplot(fig, use_container_width=True)
-    st.metric("Total colonies detected", int(count))
+    st.metric("Colônias detectadas", int(count))
 
-# ---------- Name field ABOVE video ----------
-name_top = st.text_input("Image name (optional, without extension)", placeholder="e.g., plate_A01", key="name_top")
+# ---------- Nome + Altura do preview (no topo) ----------
+col_name, col_h = st.columns([2, 1])
+with col_name:
+    name_top = st.text_input("Nome da imagem (sem extensão)", placeholder="ex.: prato_A01", key="name_top")
+with col_h:
+    preview_h = st.slider("Altura do preview (px)", 280, 900, 520, step=10, key="preview_h")
 
-# ---------- Live camera (rear only) ----------
-st.write("Back camera only. Tap START and allow camera access.")
+# CSS de segurança (caso o atributo style não seja aplicado)
+st.markdown(f"""
+<style>
+video[playsinline] {{
+  height: {preview_h}px !important;
+  width: 100% !important;
+  object-fit: contain !important;
+  background: #000 !important;
+  border-radius: 12px !important;
+}}
+</style>
+""", unsafe_allow_html=True)
+
+# ---------- Câmera traseira com círculo ----------
+st.write("Câmera traseira. Toque em START e permita o acesso.")
 
 class CircleOverlay:
     def __init__(self):
@@ -179,7 +195,6 @@ class CircleOverlay:
             self.last_frame_rgb = rgb
         return av.VideoFrame.from_ndarray(img_bgr, format="bgr24")
 
-# Force rear camera; include hint to help iOS/Safari
 video_constraints = {
     "facingMode": {"exact": "environment"},
     "advanced": [{"facingMode": "environment"}],
@@ -188,16 +203,18 @@ video_constraints = {
     "frameRate": {"ideal": 30},
 }
 
+video_style = f"width:100%;max-width:100%;height:{preview_h}px;object-fit:contain;background:#000;border-radius:12px;"
+
 ctx = webrtc_streamer(
     key="camera_live_circle",
     mode=WebRtcMode.SENDRECV,
     rtc_configuration=rtc_config,
     media_stream_constraints={"video": video_constraints, "audio": False},
-    video_html_attrs=VideoHTMLAttributes(autoPlay=True, controls=False, playsinline=True),
+    video_html_attrs=VideoHTMLAttributes(autoPlay=True, controls=False, playsinline=True, style=video_style),
     video_processor_factory=CircleOverlay,
 )
 
-# keep overlay synced with sliders
+# sincroniza o overlay com os sliders
 if ctx and ctx.video_processor:
     ctx.video_processor.radius    = radius
     ctx.video_processor.thickness = thickness
@@ -219,14 +236,12 @@ def get_current_frame_rgb():
     return None
 
 st.divider()
-if st.button("📸 Capture & Save"):
+if st.button("📸 Capturar & Salvar"):
     rgb = get_current_frame_rgb()
     if rgb is None:
-        st.info("No camera frames. Ensure permission is granted and you’re on HTTPS.")
+        st.info("Sem frames da câmera. Garanta a permissão e que está em HTTPS.")
     else:
-        # choose base name: top field > sidebar field > timestamp
         base = (name_top or filename_in or f"petri_{datetime.now().strftime('%Y%m%d_%H%M%S')}").strip()
-
         H, W = rgb.shape[:2]
         cx = int(x_frac * W); cy = int(y_frac * H); r = int(radius)
 
@@ -234,11 +249,13 @@ if st.button("📸 Capture & Save"):
             rgb, cx, cy, r, margin=int(margin), open_iters=int(open_iters), blur_ksize=int(blur_ksize)
         )
         if cropped_rgb is None:
-            st.error("Nothing inside the circle. Adjust the circle or recenter.")
+            st.error("Nada dentro do círculo. Ajuste o círculo ou recoloque a placa.")
         else:
             count, vis_rgb = count_colonies(cv2.cvtColor(cropped_rgb, cv2.COLOR_RGB2BGR))
             save_bytes_and_buttons(base, cropped_rgb, cropped_mask, vis_rgb, count)
 
-st.caption("If your network blocks WebRTC, you may need a TURN server; otherwise the gallery alternative is removed as requested.")
+st.caption("Dica: no iPhone use Safari; se a rede bloquear WebRTC, pode ser necessário um servidor TURN.")
+
+
 
 
